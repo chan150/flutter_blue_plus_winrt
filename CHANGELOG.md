@@ -1,3 +1,8 @@
+## 0.0.6
+* Fix: ensure `connect` method waits for actual physical connection completion before returning a result.
+* Fix: enhanced thread safety during rapid connection and disconnection to prevent `vector erase` crashes.
+* Improvement: more robust resource cleanup when connection attempts fail.
+
 ## 0.0.5
 * Fix: compilation errors (C2220) and typos in method signatures.
 
