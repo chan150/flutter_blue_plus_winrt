@@ -64,6 +64,7 @@ class FlutterBluePlusWinrtPlugin : public flutter::Plugin {
   // Caches for GATT objects to avoid repeated discovery
   std::map<std::string, winrt::Windows::Foundation::IInspectable> characteristic_cache_{};
   std::map<std::string, winrt::Windows::Foundation::IInspectable> descriptor_cache_{};
+  std::map<std::string, std::vector<winrt::Windows::Foundation::IInspectable>> service_cache_{};
 
   void OnAdvertisementReceived(
       const winrt::Windows::Devices::Bluetooth::Advertisement::BluetoothLEAdvertisementWatcher&,
@@ -169,6 +170,8 @@ class FlutterBluePlusWinrtPlugin : public flutter::Plugin {
       std::string remote_id,
       std::string primaryServiceUuid,
       std::shared_ptr<flutter::EncodableList> outList);
+
+  void ClearDeviceResources(std::string remote_id);
 };
 
 }  // namespace flutter_blue_plus_winrt

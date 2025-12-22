@@ -1,6 +1,6 @@
 name: flutter_blue_plus_winrt
 description: Windows implementation of the flutter_blue_plus plugin.
-version: 0.0.2
+version: 0.0.3
 homepage: https://github.com/chan150/flutter_blue_plus_winrt
 
 environment:
