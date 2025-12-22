@@ -753,26 +753,17 @@ winrt::fire_and_forget FlutterBluePlusWinrtPlugin::ConnectAsync(
                  result->Success(flutter::EncodableValue(true));
                  co_return;
             } else {
-                 std::vector<BluetoothLEDevice> to_close;
+                 std::vector<BluetoothLEDevice> devices_to_close;
+                 for (auto& p : connected_devices_) { if (p.first == remote_id) devices_to_close.push_back(p.second.as<BluetoothLEDevice>()); }
+                 for (auto& p : currently_connecting_devices_) { if (p.first == remote_id) devices_to_close.push_back(p.second.as<BluetoothLEDevice>()); }
+
                  connected_devices_.erase(std::remove_if(connected_devices_.begin(), connected_devices_.end(),
-                    [&](const auto& pair) {
-                        if (pair.first == remote_id) {
-                            try { auto d = pair.second.as<BluetoothLEDevice>(); if (d) to_close.push_back(d); } catch(...) {}
-                            return true;
-                        }
-                        return false;
-                    }), connected_devices_.end());
+                    [&](const auto& pair) { return pair.first == remote_id; }), connected_devices_.end());
 
                  currently_connecting_devices_.erase(std::remove_if(currently_connecting_devices_.begin(), currently_connecting_devices_.end(),
-                        [&](const auto& pair) {
-                            if (pair.first == remote_id) {
-                                try { auto d = pair.second.as<BluetoothLEDevice>(); if (d) to_close.push_back(d); } catch(...) {}
-                                return true;
-                            }
-                            return false;
-                        }), currently_connecting_devices_.end());
+                    [&](const auto& pair) { return pair.first == remote_id; }), currently_connecting_devices_.end());
                  
-                 for (auto& d : to_close) { try { d.Close(); } catch(...) {} }
+                 for (auto& d : devices_to_close) { try { d.Close(); } catch(...) {} }
 
                  flutter::EncodableMap connection_state;
                  connection_state[flutter::EncodableValue("remote_id")] = flutter::EncodableValue(remote_id);
@@ -814,8 +805,7 @@ void FlutterBluePlusWinrtPlugin::OnConnectionStatusChanged(const BluetoothLEDevi
                   if(it_connecting != currently_connecting_devices_.end()) {
                        auto dev_obj = it_connecting->second;
                        connected_devices_.emplace_back(remote_id, dev_obj);
-                       currently_connecting_devices_.erase(std::remove_if(currently_connecting_devices_.begin(), currently_connecting_devices_.end(),
-                           [&](const auto& pair) { return pair.first == remote_id; }), currently_connecting_devices_.end());
+                       currently_connecting_devices_.erase(it_connecting);
                        solicited = true;
                   }
              }
@@ -830,26 +820,17 @@ void FlutterBluePlusWinrtPlugin::OnConnectionStatusChanged(const BluetoothLEDevi
         } else {
             ClearDeviceResources(remote_id);
 
-            std::vector<BluetoothLEDevice> to_close;
+            std::vector<BluetoothLEDevice> devices_to_close;
+            for (auto& p : connected_devices_) { if (p.first == remote_id) devices_to_close.push_back(p.second.as<BluetoothLEDevice>()); }
+            for (auto& p : currently_connecting_devices_) { if (p.first == remote_id) devices_to_close.push_back(p.second.as<BluetoothLEDevice>()); }
+
             currently_connecting_devices_.erase(std::remove_if(currently_connecting_devices_.begin(), currently_connecting_devices_.end(),
-                [&](const auto& pair) { 
-                    if (pair.first == remote_id) {
-                        try { auto d = pair.second.as<BluetoothLEDevice>(); if (d) to_close.push_back(d); } catch(...) {}
-                        return true;
-                    }
-                    return false;
-                }), currently_connecting_devices_.end());
+                [&](const auto& pair) { return pair.first == remote_id; }), currently_connecting_devices_.end());
 
             connected_devices_.erase(std::remove_if(connected_devices_.begin(), connected_devices_.end(),
-                [&](const auto& pair) { 
-                    if (pair.first == remote_id) {
-                        try { auto d = pair.second.as<BluetoothLEDevice>(); if (d) to_close.push_back(d); } catch(...) {}
-                        return true;
-                    }
-                    return false;
-                }), connected_devices_.end());
+                [&](const auto& pair) { return pair.first == remote_id; }), connected_devices_.end());
             
-            for (auto& d : to_close) { try { d.Close(); } catch(...) {} }
+            for (auto& d_close : devices_to_close) { try { d_close.Close(); } catch(...) {} }
 
             connection_state[flutter::EncodableValue("connection_state")] = flutter::EncodableValue(0);
             channel_->InvokeMethod("OnConnectionStateChanged", std::make_unique<flutter::EncodableValue>(connection_state));

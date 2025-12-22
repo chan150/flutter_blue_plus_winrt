@@ -1,3 +1,10 @@
+## 0.0.5
+* Fix: compilation errors (C2220) and typos in method signatures.
+
+## 0.0.4
+* Fix: crash during connection/disconnection caused by invalid vector iterators.
+* Feature: add `setOptions` implementation.
+
 ## 0.0.3
 * Fix: ensure physical disconnection by explicitly closing all GATT services.
 * Fix: potential race condition where a device might stay connected if disconnected during the connection process.
