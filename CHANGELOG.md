@@ -1,3 +1,6 @@
+## 0.0.9
+* Fix: "vector erase iterator outside range" crash by safely handling device closure to avoid synchronous vector modifications.
+
 ## 0.0.8
 * Fix: ensure `connect` method waits for actual physical connection completion before returning a result.
 
