@@ -1,6 +1,6 @@
 name: flutter_blue_plus_winrt
 description: Windows implementation of the flutter_blue_plus plugin.
-version: 0.0.19
+version: 0.0.20
 homepage: https://github.com/chan150/flutter_blue_plus_winrt
 
 environment:
@@ -10,12 +10,12 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  flutter_blue_plus_platform_interface:
+  flutter_blue_plus_platform_interface: ">=9.0.0"
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
-  flutter_lints: ^5.0.0
+  flutter_lints:
 
 flutter:
   plugin:
