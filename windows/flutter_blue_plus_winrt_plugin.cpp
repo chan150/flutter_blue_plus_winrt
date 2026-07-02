@@ -372,7 +372,10 @@ FlutterBluePlusWinrtPlugin::PopulateCharacteristicsAsync(
                 std::string charUuid = utils::to_uuid_string(characteristic.Uuid());
                 int32_t handle = static_cast<int32_t>(characteristic.AttributeHandle());
 
-                characteristic_cache_[remote_id + ":" + std::to_string(handle)] = characteristic;
+                {
+                    std::lock_guard<std::mutex> cache_lock(gatt_cache_mutex_);
+                    characteristic_cache_[remote_id + ":" + std::to_string(handle)] = characteristic;
+                }
 
                 charMap[flutter::EncodableValue("remote_id")] = flutter::EncodableValue(remote_id);
                 if (!primaryServiceUuid.empty()) {
@@ -408,8 +411,11 @@ FlutterBluePlusWinrtPlugin::PopulateCharacteristicsAsync(
                         try {
                             flutter::EncodableMap descMap;
                             int32_t d_handle = static_cast<int32_t>(descriptor.AttributeHandle());
-                            
-                            descriptor_cache_[remote_id + ":" + std::to_string(d_handle)] = descriptor;
+
+                            {
+                                std::lock_guard<std::mutex> cache_lock(gatt_cache_mutex_);
+                                descriptor_cache_[remote_id + ":" + std::to_string(d_handle)] = descriptor;
+                            }
 
                             descMap[flutter::EncodableValue("remote_id")] = flutter::EncodableValue(remote_id);
                             if (!primaryServiceUuid.empty()) {
@@ -443,8 +449,13 @@ FlutterBluePlusWinrtPlugin::GetCharacteristicInternalAsync(
 {
     if (instance_id != 0) {
         std::string cache_key = remote_id + ":" + std::to_string(instance_id);
-        auto it = characteristic_cache_.find(cache_key);
-        if (it != characteristic_cache_.end()) co_return it->second.as<GattCharacteristic>();
+        winrt::Windows::Foundation::IInspectable cached = nullptr;
+        {
+            std::lock_guard<std::mutex> cache_lock(gatt_cache_mutex_);
+            auto it = characteristic_cache_.find(cache_key);
+            if (it != characteristic_cache_.end()) cached = it->second;
+        }
+        if (cached) co_return cached.as<GattCharacteristic>();
     }
 
     GattCharacteristic targetChar = nullptr;
@@ -454,8 +465,9 @@ FlutterBluePlusWinrtPlugin::GetCharacteristicInternalAsync(
     if (!targetChar) {
         targetChar = co_await GetCharacteristicAsync(device, service_uuid_str, characteristic_uuid_str, primary_service_uuid_str, instance_id);
     }
-    
+
     if (targetChar && instance_id != 0) {
+        std::lock_guard<std::mutex> cache_lock(gatt_cache_mutex_);
         characteristic_cache_[remote_id + ":" + std::to_string(instance_id)] = targetChar;
     }
     co_return targetChar;
@@ -492,7 +504,11 @@ FlutterBluePlusWinrtPlugin::FlutterBluePlusWinrtPlugin(flutter::PluginRegistrarW
 }
 
 FlutterBluePlusWinrtPlugin::~FlutterBluePlusWinrtPlugin() {
-    is_alive_ = false;
+    // Signal all in-flight coroutines / event handlers that the plugin is gone.
+    // They capture a copy of this shared flag and bail out before touching
+    // `this`, avoiding use-after-free during teardown.
+    *is_alive_ = false;
+    try { watcher_.Stop(); } catch (...) {}
     watcher_.Stopped(stopped_token_);
     watcher_.Received(received_token_);
 }
@@ -501,15 +517,28 @@ void FlutterBluePlusWinrtPlugin::OnAdvertisementReceived(
     const BluetoothLEAdvertisementWatcher&,
     const BluetoothLEAdvertisementReceivedEventArgs& args) {
 
-    [this, args]() -> winrt::fire_and_forget {
+    [this, args, alive = is_alive_]() -> winrt::fire_and_forget {
         try {
             co_await ui_thread_;
+            if (!*alive) co_return;
 
             if (channel_) {
                 std::string remote_id = uint64_to_mac_string(args.BluetoothAddress());
+
+                // Bound memory usage: a hostile environment can rotate BLE
+                // addresses rapidly (address randomization / spoofing). Cap the
+                // number of distinct devices tracked during a scan session so
+                // the caches cannot grow without limit. Already-known devices
+                // keep updating normally.
+                constexpr size_t kMaxScanDevices = 4096;
+                bool is_new_device = scan_results_cache_.find(remote_id) == scan_results_cache_.end();
+                if (is_new_device && scan_results_cache_.size() >= kMaxScanDevices) {
+                    co_return;
+                }
+
                 rssi_cache_[remote_id] = static_cast<int32_t>(args.RawSignalStrengthInDBm());
 
-                if (scan_results_cache_.find(remote_id) == scan_results_cache_.end()) {
+                if (is_new_device) {
                      scan_results_cache_[remote_id] = {};
                 }
                 auto& map = scan_results_cache_[remote_id];
@@ -542,6 +571,10 @@ void FlutterBluePlusWinrtPlugin::OnAdvertisementReceived(
 
                 for (const auto& section : advertisement.DataSections()) {
                     if (section.DataType() == 0x19) {
+                        // Guard against a malformed/hostile peripheral sending an
+                        // appearance section shorter than 2 bytes; ReadUInt16 would
+                        // otherwise throw and abort processing of the whole packet.
+                        if (section.Data().Length() < 2) break;
                         auto reader = winrt::Windows::Storage::Streams::DataReader::FromBuffer(section.Data());
                         reader.ByteOrder(winrt::Windows::Storage::Streams::ByteOrder::LittleEndian);
                         uint16_t appearance_value = reader.ReadUInt16();
@@ -1005,9 +1038,10 @@ std::string FlutterBluePlusWinrtPlugin::uint64_to_mac_string(uint64_t addr) {
 
 void FlutterBluePlusWinrtPlugin::OnConnectionStatusChanged(const BluetoothLEDevice& device, const IInspectable&) {
     // Capture device by value to avoid dangling references
-    [this](BluetoothLEDevice d) -> winrt::fire_and_forget {
+    [this, alive = is_alive_](BluetoothLEDevice d) -> winrt::fire_and_forget {
         co_await ui_thread_;
-        
+        if (!*alive) co_return;
+
         std::string remote_id = uint64_to_mac_string(d.BluetoothAddress());
         flutter::EncodableMap connection_state;
         connection_state[flutter::EncodableValue("remote_id")] = flutter::EncodableValue(remote_id);
@@ -1112,7 +1146,10 @@ winrt::fire_and_forget FlutterBluePlusWinrtPlugin::DiscoverServicesAsync(
             } else {
                 flutter::EncodableList servicesList;
                 for (auto service : servicesResult.Services()) {
-                     service_cache_[remote_id].push_back(service);
+                     {
+                         std::lock_guard<std::mutex> cache_lock(gatt_cache_mutex_);
+                         service_cache_[remote_id].push_back(service);
+                     }
                      flutter::EncodableMap serviceMap;
                      std::string serviceUuid = utils::to_uuid_string(service.Uuid());
                      serviceMap[flutter::EncodableValue("remote_id")] = flutter::EncodableValue(remote_id);
@@ -1125,7 +1162,10 @@ winrt::fire_and_forget FlutterBluePlusWinrtPlugin::DiscoverServicesAsync(
                      auto includedResult = co_await service.GetIncludedServicesAsync(BluetoothCacheMode::Cached);
                      if (includedResult.Status() == GattCommunicationStatus::Success) {
                          for (auto includedService : includedResult.Services()) {
-                             service_cache_[remote_id].push_back(includedService);
+                             {
+                                 std::lock_guard<std::mutex> cache_lock(gatt_cache_mutex_);
+                                 service_cache_[remote_id].push_back(includedService);
+                             }
                              flutter::EncodableMap includedMap;
                              std::string includedUuid = utils::to_uuid_string(includedService.Uuid());
                              includedMap[flutter::EncodableValue("remote_id")] = flutter::EncodableValue(remote_id);
@@ -1159,9 +1199,10 @@ winrt::fire_and_forget FlutterBluePlusWinrtPlugin::DiscoverServicesAsync(
 }
 
 void FlutterBluePlusWinrtPlugin::OnCharacteristicValueChanged(std::string remote_id, const GattCharacteristic& sender, const GattValueChangedEventArgs& args) {
-    [this, remote_id, sender, args]() -> winrt::fire_and_forget {
+    [this, remote_id, sender, args, alive = is_alive_]() -> winrt::fire_and_forget {
         try {
             co_await ui_thread_;
+            if (!*alive) co_return;
             flutter::EncodableMap response;
             response[flutter::EncodableValue("remote_id")] = flutter::EncodableValue(remote_id);
             response[flutter::EncodableValue("service_uuid")] = flutter::EncodableValue(utils::to_uuid_string(sender.Service().Uuid()));
@@ -1177,9 +1218,10 @@ void FlutterBluePlusWinrtPlugin::OnCharacteristicValueChanged(std::string remote
 }
 
 void FlutterBluePlusWinrtPlugin::OnMaxPduSizeChanged(std::string remote_id, const GattSession& sender, const IInspectable&) {
-    [this, remote_id, sender]() -> winrt::fire_and_forget {
+    [this, remote_id, sender, alive = is_alive_]() -> winrt::fire_and_forget {
         try {
             co_await ui_thread_;
+            if (!*alive) co_return;
             flutter::EncodableMap response;
             response[flutter::EncodableValue("remote_id")] = flutter::EncodableValue(remote_id);
             response[flutter::EncodableValue("mtu")] = flutter::EncodableValue(static_cast<int32_t>(sender.MaxPduSize()));
@@ -1260,6 +1302,7 @@ winrt::fire_and_forget FlutterBluePlusWinrtPlugin::SetNotifyValueAsync(std::shar
 
                     if (status == GattCommunicationStatus::Success) {
                         co_await ui_thread_;
+                        std::lock_guard<std::mutex> cache_lock(gatt_cache_mutex_);
                         auto it = subscribed_characteristics_.find(token_key);
                         if (it != subscribed_characteristics_.end()) {
                             try { it->second.characteristic.as<GattCharacteristic>().ValueChanged(it->second.token); } catch(...) {}
@@ -1276,6 +1319,7 @@ winrt::fire_and_forget FlutterBluePlusWinrtPlugin::SetNotifyValueAsync(std::shar
                     GattCommunicationStatus status = co_await targetChar.WriteClientCharacteristicConfigurationDescriptorAsync(GattClientCharacteristicConfigurationDescriptorValue::None);
                     if (status == GattCommunicationStatus::Success || actual_char_uuid == "2a05") {
                         co_await ui_thread_;
+                        std::lock_guard<std::mutex> cache_lock(gatt_cache_mutex_);
                         auto it = subscribed_characteristics_.find(token_key);
                         if (it != subscribed_characteristics_.end()) {
                             try { it->second.characteristic.as<GattCharacteristic>().ValueChanged(it->second.token); } catch(...) {}
@@ -1433,6 +1477,7 @@ winrt::fire_and_forget FlutterBluePlusWinrtPlugin::ReadDescriptorAsync(flutter::
             GattDescriptor targetDesc = nullptr;
             if (instance_id != 0) {
                 std::string d_key = remote_id + ":" + std::to_string(instance_id);
+                std::lock_guard<std::mutex> cache_lock(gatt_cache_mutex_);
                 auto it_d = descriptor_cache_.find(d_key);
                 if (it_d != descriptor_cache_.end()) targetDesc = it_d->second.as<GattDescriptor>();
             }
@@ -1505,6 +1550,7 @@ winrt::fire_and_forget FlutterBluePlusWinrtPlugin::WriteDescriptorAsync(flutter:
             GattDescriptor targetDesc = nullptr;
             if (instance_id != 0) {
                 std::string d_key = remote_id + ":" + std::to_string(instance_id);
+                std::lock_guard<std::mutex> cache_lock(gatt_cache_mutex_);
                 auto it_d = descriptor_cache_.find(d_key);
                 if (it_d != descriptor_cache_.end()) targetDesc = it_d->second.as<GattDescriptor>();
             }
@@ -1549,6 +1595,11 @@ winrt::fire_and_forget FlutterBluePlusWinrtPlugin::WriteDescriptorAsync(flutter:
 }
 
 void FlutterBluePlusWinrtPlugin::ClearDeviceResources(std::string remote_id) {
+    // Guards every cache touched below against concurrent background-thread
+    // access (service discovery / read / write). This function performs no
+    // co_await, so holding the lock for its whole body is safe.
+    std::lock_guard<std::mutex> cache_lock(gatt_cache_mutex_);
+
     for (auto it = subscribed_characteristics_.begin(); it != subscribed_characteristics_.end(); ) {
         if (it->first.find(remote_id) == 0) {
             try {
@@ -1600,11 +1651,15 @@ void FlutterBluePlusWinrtPlugin::ClearDeviceResources(std::string remote_id) {
 }
 
 winrt::fire_and_forget FlutterBluePlusWinrtPlugin::PeriodicConnectionCheck() {
-    while (is_alive_) {
+    // Copy the shared alive flag into the coroutine frame so it stays valid even
+    // after the plugin object is destroyed. Check it right after every resume,
+    // before touching any `this` member.
+    auto alive = is_alive_;
+    while (*alive) {
         co_await winrt::resume_after(winrt::Windows::Foundation::TimeSpan(20000000));
-        if (!is_alive_) co_return;
+        if (!*alive) co_return;
         co_await ui_thread_;
-        if (!is_alive_) co_return;
+        if (!*alive) co_return;
 
         std::vector<std::string> mac_to_remove;
         {
@@ -1680,12 +1735,15 @@ void FlutterBluePlusWinrtPlugin::HandleMethodCall(const flutter::MethodCall<flut
             ClearDeviceResources(remote_id);
         }
         
-        rssi_cache_.clear(); 
-        scan_results_cache_.clear(); 
-        subscribed_characteristics_.clear(); 
-        characteristic_cache_.clear(); 
-        descriptor_cache_.clear(); 
-        service_cache_.clear();
+        {
+            std::lock_guard<std::mutex> cache_lock(gatt_cache_mutex_);
+            rssi_cache_.clear();
+            scan_results_cache_.clear();
+            subscribed_characteristics_.clear();
+            characteristic_cache_.clear();
+            descriptor_cache_.clear();
+            service_cache_.clear();
+        }
 
         for (auto& d : to_close) { try { d.Close(); } catch(...) {} }
 
@@ -1786,9 +1844,14 @@ void FlutterBluePlusWinrtPlugin::HandleMethodCall(const flutter::MethodCall<flut
             if (it != args->end()) remote_id = utils::from_value<std::string>(&it->second);
         }
         if (!remote_id.empty()) {
-            auto it = gatt_sessions_.find(remote_id);
-            if (it != gatt_sessions_.end()) {
-                auto session = it->second.as<GattSession>();
+            winrt::Windows::Foundation::IInspectable session_obj = nullptr;
+            {
+                std::lock_guard<std::mutex> cache_lock(gatt_cache_mutex_);
+                auto it = gatt_sessions_.find(remote_id);
+                if (it != gatt_sessions_.end()) session_obj = it->second;
+            }
+            if (session_obj) {
+                auto session = session_obj.as<GattSession>();
                 flutter::EncodableMap response;
                 response[flutter::EncodableValue("remote_id")] = flutter::EncodableValue(remote_id);
                 response[flutter::EncodableValue("mtu")] = flutter::EncodableValue(static_cast<int32_t>(session.MaxPduSize()));

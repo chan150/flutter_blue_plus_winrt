@@ -48,7 +48,11 @@ class FlutterBluePlusWinrtPlugin : public flutter::Plugin {
   winrt::event_token received_token_{};
   winrt::event_token stopped_token_{};
   
-  std::atomic<bool> is_alive_{ true };
+  // Shared "alive" flag. Held by a shared_ptr so that fire-and-forget
+  // coroutines / event handlers can capture a copy and safely check whether
+  // the plugin has been destroyed after resuming, instead of dereferencing a
+  // dangling `this`.
+  std::shared_ptr<std::atomic<bool>> is_alive_ = std::make_shared<std::atomic<bool>>(true);
 
   // UI Thread context
   winrt::apartment_context ui_thread_;
@@ -62,6 +66,14 @@ class FlutterBluePlusWinrtPlugin : public flutter::Plugin {
 
   // Map to store event tokens and characteristic objects for notifications
   std::map<std::string, SubscribedCharacteristic> subscribed_characteristics_{};
+
+  // Guards the GATT object caches below (characteristic_cache_,
+  // descriptor_cache_, service_cache_, subscribed_characteristics_,
+  // gatt_sessions_, mtu_tokens_). These are accessed both from background
+  // thread-pool continuations (service discovery / read / write) and from the
+  // UI thread (ClearDeviceResources on disconnect), so every access must hold
+  // this mutex. NOTE: never hold this across a `co_await`.
+  std::mutex gatt_cache_mutex_;
 
   // Caches for GATT objects to avoid repeated discovery
   std::map<std::string, winrt::Windows::Foundation::IInspectable> characteristic_cache_{};
