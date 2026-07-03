@@ -69,10 +69,11 @@ class FlutterBluePlusWinrtPlugin : public flutter::Plugin {
 
   // Guards the GATT object caches below (characteristic_cache_,
   // descriptor_cache_, service_cache_, subscribed_characteristics_,
-  // gatt_sessions_, mtu_tokens_). These are accessed both from background
-  // thread-pool continuations (service discovery / read / write) and from the
-  // UI thread (ClearDeviceResources on disconnect), so every access must hold
-  // this mutex. NOTE: never hold this across a `co_await`.
+  // gatt_sessions_, mtu_tokens_, connection_tokens_). These are accessed both
+  // from background thread-pool continuations (service discovery / read /
+  // write) and from the UI thread (ClearDeviceResources on disconnect), so
+  // every access must hold this mutex. NOTE: never hold this across a
+  // `co_await`.
   std::mutex gatt_cache_mutex_;
 
   // Caches for GATT objects to avoid repeated discovery
@@ -83,6 +84,11 @@ class FlutterBluePlusWinrtPlugin : public flutter::Plugin {
   // MTU / Session Handling
   std::map<std::string, winrt::Windows::Foundation::IInspectable> gatt_sessions_{};
   std::map<std::string, winrt::event_token> mtu_tokens_{};
+
+  // Per-device ConnectionStatusChanged event tokens, so the handlers can be
+  // revoked (in ClearDeviceResources and the destructor) and never fire into a
+  // destroyed plugin. Guarded by gatt_cache_mutex_.
+  std::map<std::string, winrt::event_token> connection_tokens_{};
 
   void OnAdvertisementReceived(
       const winrt::Windows::Devices::Bluetooth::Advertisement::BluetoothLEAdvertisementWatcher&,

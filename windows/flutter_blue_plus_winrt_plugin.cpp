@@ -511,6 +511,23 @@ FlutterBluePlusWinrtPlugin::~FlutterBluePlusWinrtPlugin() {
     try { watcher_.Stop(); } catch (...) {}
     watcher_.Stopped(stopped_token_);
     watcher_.Received(received_token_);
+
+    // Revoke any still-registered per-device ConnectionStatusChanged handlers
+    // so a late event can't invoke OnConnectionStatusChanged on a destroyed
+    // plugin. Lock order is devices_mutex_ then gatt_cache_mutex_ (never the
+    // reverse anywhere), so this cannot deadlock.
+    std::lock_guard<std::mutex> devices_lock(devices_mutex_);
+    std::lock_guard<std::mutex> cache_lock(gatt_cache_mutex_);
+    auto revoke_all = [this](const std::vector<std::pair<std::string, IInspectable>>& devices) {
+        for (const auto& pair : devices) {
+            auto it = connection_tokens_.find(pair.first);
+            if (it == connection_tokens_.end()) continue;
+            try { pair.second.as<BluetoothLEDevice>().ConnectionStatusChanged(it->second); } catch (...) {}
+        }
+    };
+    revoke_all(connected_devices_);
+    revoke_all(currently_connecting_devices_);
+    connection_tokens_.clear();
 }
 
 void FlutterBluePlusWinrtPlugin::OnAdvertisementReceived(
@@ -905,7 +922,11 @@ winrt::fire_and_forget FlutterBluePlusWinrtPlugin::ConnectAsync(
                      currently_connecting_devices_.emplace_back(remote_id, device);
                 }
             }
-            device.ConnectionStatusChanged({ this, &FlutterBluePlusWinrtPlugin::OnConnectionStatusChanged });
+            auto conn_token = device.ConnectionStatusChanged({ this, &FlutterBluePlusWinrtPlugin::OnConnectionStatusChanged });
+            {
+                std::lock_guard<std::mutex> cache_lock(gatt_cache_mutex_);
+                connection_tokens_[remote_id] = conn_token;
+            }
 
             co_await winrt::resume_background();
             // Force connection by discovery
@@ -951,6 +972,7 @@ winrt::fire_and_forget FlutterBluePlusWinrtPlugin::ConnectAsync(
             
             if (should_close) {
                 if (device) {
+                    { std::lock_guard<std::mutex> cache_lock(gatt_cache_mutex_); connection_tokens_.erase(remote_id); }
                     device.Close();
                 }
                 result->Success(flutter::EncodableValue(false));
@@ -1008,8 +1030,10 @@ winrt::fire_and_forget FlutterBluePlusWinrtPlugin::ConnectAsync(
                      }
                  }
                  
-                 for (auto& d : devices_to_close) { 
-                     try { d.Close(); } catch(...) {} 
+                 { std::lock_guard<std::mutex> cache_lock(gatt_cache_mutex_); connection_tokens_.erase(remote_id); }
+
+                 for (auto& d : devices_to_close) {
+                     try { d.Close(); } catch(...) {}
                  }
 
                  flutter::EncodableMap connection_state;
@@ -1648,6 +1672,10 @@ void FlutterBluePlusWinrtPlugin::ClearDeviceResources(std::string remote_id) {
     }
 
     rssi_cache_.erase(remote_id);
+
+    // The device is Closed by the caller in the same disconnect flow, so the
+    // handler stops firing; just drop the token entry to keep the map bounded.
+    connection_tokens_.erase(remote_id);
 }
 
 winrt::fire_and_forget FlutterBluePlusWinrtPlugin::PeriodicConnectionCheck() {
