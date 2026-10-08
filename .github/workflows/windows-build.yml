@@ -1,0 +1,17 @@
+# Compiles the plugin inside a throwaway Windows app. No device, so this proves
+# the C++ builds, not that BLE works.
+name: windows-build
+on: [push, pull_request, workflow_dispatch]
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+      - run: flutter create --platforms=windows --project-name probe ..\probe
+      - working-directory: ..\probe
+        run: |
+          flutter pub add 'flutter_blue_plus_winrt:{"path":"../flutter_blue_plus_winrt"}'
+          flutter build windows --debug
