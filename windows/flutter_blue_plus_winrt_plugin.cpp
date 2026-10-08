@@ -1489,7 +1489,14 @@ winrt::fire_and_forget FlutterBluePlusWinrtPlugin::WriteCharacteristicAsync(flut
                 auto writer = winrt::Windows::Storage::Streams::DataWriter();
                 writer.WriteBytes(value);
                 GattWriteOption option = (write_type == 1) ? GattWriteOption::WriteWithoutResponse : GattWriteOption::WriteWithResponse;
-                auto writeResult = co_await targetChar.WriteValueWithResultAsync(writer.DetachBuffer(), option);
+                auto writeOp = targetChar.WriteValueWithResultAsync(writer.DetachBuffer(), option);
+                // Without response, answer as soon as the stack has the packet,
+                // as Android and Darwin do. Awaiting the send held the next
+                // write back a connection event or more (Win10 FOTA ~8KB/s).
+                // Order holds: the next write starts after this call returned.
+                // A failed send goes unreported, as on the other platforms.
+                GattCommunicationStatus status = GattCommunicationStatus::Success;
+                if (write_type != 1) status = (co_await writeOp).Status();
 
                 co_await ui_thread_;
                 flutter::EncodableMap response;
@@ -1498,9 +1505,9 @@ winrt::fire_and_forget FlutterBluePlusWinrtPlugin::WriteCharacteristicAsync(flut
                 response[flutter::EncodableValue("characteristic_uuid")] = flutter::EncodableValue(characteristic_uuid_str);
                 response[flutter::EncodableValue("instance_id")] = flutter::EncodableValue(instance_id);
                 response[flutter::EncodableValue("value")] = flutter::EncodableValue(value);
-                response[flutter::EncodableValue("success")] = flutter::EncodableValue(writeResult.Status() == GattCommunicationStatus::Success ? 1 : 0);
-                response[flutter::EncodableValue("error_code")] = flutter::EncodableValue((int)writeResult.Status());
-                response[flutter::EncodableValue("error_string")] = flutter::EncodableValue(writeResult.Status() == GattCommunicationStatus::Success ? "GATT_SUCCESS" : "Write failed");
+                response[flutter::EncodableValue("success")] = flutter::EncodableValue(status == GattCommunicationStatus::Success ? 1 : 0);
+                response[flutter::EncodableValue("error_code")] = flutter::EncodableValue((int)status);
+                response[flutter::EncodableValue("error_string")] = flutter::EncodableValue(status == GattCommunicationStatus::Success ? "GATT_SUCCESS" : "Write failed");
                 channel_->InvokeMethod("OnCharacteristicWritten", std::make_unique<flutter::EncodableValue>(response));
                 result_ptr->Success(flutter::EncodableValue(true));
                 co_return;
