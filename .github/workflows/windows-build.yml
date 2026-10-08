@@ -10,8 +10,11 @@ jobs:
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
-      - run: flutter create --platforms=windows --project-name probe ..\probe
-      - working-directory: ..\probe
+      # bash: pwsh drops the inner quotes and carries on past a failed step.
+      - shell: bash
         run: |
+          flutter create --platforms=windows --project-name probe ../probe
+          cd ../probe
           flutter pub add 'flutter_blue_plus_winrt:{"path":"../flutter_blue_plus_winrt"}'
+          grep flutter_blue_plus_winrt windows/flutter/generated_plugins.cmake
           flutter build windows --debug
