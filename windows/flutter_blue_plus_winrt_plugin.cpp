@@ -528,6 +528,11 @@ FlutterBluePlusWinrtPlugin::~FlutterBluePlusWinrtPlugin() {
     revoke_all(connected_devices_);
     revoke_all(currently_connecting_devices_);
     connection_tokens_.clear();
+
+    // Same for MaxPduSizeChanged, which also calls into `this`.
+    std::vector<std::string> session_ids;
+    for (const auto& pair : gatt_sessions_) session_ids.push_back(pair.first);
+    for (const auto& id : session_ids) CloseSessionLocked(id);
 }
 
 void FlutterBluePlusWinrtPlugin::OnAdvertisementReceived(
@@ -939,6 +944,16 @@ winrt::fire_and_forget FlutterBluePlusWinrtPlugin::ConnectAsync(
                  wait_retry++;
             }
 
+            // Windows negotiates the ATT MTU itself; the session is where it
+            // shows (MaxPduSize). Without it Dart sees 23 forever.
+            // A stale one goes first: FromDeviceIdAsync may hand back the same
+            // object, which must not be closed after we take it.
+            GattSession session{ nullptr };
+            if (gatt_result.Status() == GattCommunicationStatus::Success) {
+                { std::lock_guard<std::mutex> cache_lock(gatt_cache_mutex_); CloseSessionLocked(remote_id); }
+                try { session = co_await GattSession::FromDeviceIdAsync(device.BluetoothDeviceId()); } catch (...) {}
+            }
+
             co_await ui_thread_;
             
             bool should_close = false;
@@ -986,6 +1001,29 @@ winrt::fire_and_forget FlutterBluePlusWinrtPlugin::ConnectAsync(
                      connection_state[flutter::EncodableValue("remote_id")] = flutter::EncodableValue(remote_id);
                      connection_state[flutter::EncodableValue("connection_state")] = flutter::EncodableValue(1);
                      channel_->InvokeMethod("OnConnectionStateChanged", std::make_unique<flutter::EncodableValue>(connection_state));
+                 }
+                 if (session) {
+                     auto mtu_token = session.MaxPduSizeChanged([this, remote_id](const GattSession& s, const IInspectable& a) {
+                         OnMaxPduSizeChanged(remote_id, s, a);
+                     });
+                     IInspectable params_request{ nullptr };
+#if defined(NTDDI_WIN10_CO) && WDK_NTDDI_VERSION >= NTDDI_WIN10_CO
+                     // Windows 11 lets an app ask for a short connection
+                     // interval; Windows 10 throws here and keeps its default.
+                     try {
+                         params_request = device.RequestPreferredConnectionParameters(
+                             BluetoothLEPreferredConnectionParameters::ThroughputOptimized());
+                     } catch (...) {}
+#endif
+                     {
+                         std::lock_guard<std::mutex> cache_lock(gatt_cache_mutex_);
+                         gatt_sessions_[remote_id] = session;
+                         mtu_tokens_[remote_id] = mtu_token;
+                         if (params_request) connection_params_requests_[remote_id] = params_request;
+                     }
+                     // The MTU already negotiated, after the connected state so
+                     // Dart does not clear it again.
+                     OnMaxPduSizeChanged(remote_id, session, nullptr);
                  }
                  result->Success(flutter::EncodableValue(true));
                  co_return;
@@ -1618,6 +1656,26 @@ winrt::fire_and_forget FlutterBluePlusWinrtPlugin::WriteDescriptorAsync(flutter:
     result_ptr->Error("writeDescriptor", error_msg);
 }
 
+void FlutterBluePlusWinrtPlugin::CloseSessionLocked(const std::string& remote_id) {
+    auto it_gs = gatt_sessions_.find(remote_id);
+    if (it_gs != gatt_sessions_.end()) {
+        try {
+            auto session = it_gs->second.as<GattSession>();
+            auto it_mtu = mtu_tokens_.find(remote_id);
+            if (it_mtu != mtu_tokens_.end()) session.MaxPduSizeChanged(it_mtu->second);
+            session.Close();
+        } catch(...) {}
+        gatt_sessions_.erase(it_gs);
+    }
+    mtu_tokens_.erase(remote_id);
+
+    auto it_cp = connection_params_requests_.find(remote_id);
+    if (it_cp != connection_params_requests_.end()) {
+        try { it_cp->second.as<winrt::Windows::Foundation::IClosable>().Close(); } catch(...) {}
+        connection_params_requests_.erase(it_cp);
+    }
+}
+
 void FlutterBluePlusWinrtPlugin::ClearDeviceResources(std::string remote_id) {
     // Guards every cache touched below against concurrent background-thread
     // access (service discovery / read / write). This function performs no
@@ -1656,20 +1714,7 @@ void FlutterBluePlusWinrtPlugin::ClearDeviceResources(std::string remote_id) {
         service_cache_.erase(it_s);
     }
     
-    // Cleanup sessions and MTU tokens
-    auto it_gs = gatt_sessions_.find(remote_id);
-    if (it_gs != gatt_sessions_.end()) {
-        try {
-            auto session = it_gs->second.as<GattSession>();
-            auto it_mtu = mtu_tokens_.find(remote_id);
-            if (it_mtu != mtu_tokens_.end()) {
-                session.MaxPduSizeChanged(it_mtu->second);
-                mtu_tokens_.erase(it_mtu);
-            }
-            session.Close();
-        } catch(...) {}
-        gatt_sessions_.erase(it_gs);
-    }
+    CloseSessionLocked(remote_id);
 
     rssi_cache_.erase(remote_id);
 

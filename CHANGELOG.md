@@ -1,3 +1,7 @@
+## 0.0.21
+* Fix: MTU stayed 23 again (the GattSession was never opened). Connect now opens it and reports the negotiated MTU, then every change.
+* Windows 11: request ThroughputOptimized connection parameters while connected.
+
 ## 0.0.18
 * Fix multithreading & connection stability (#5)
 

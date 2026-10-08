@@ -69,7 +69,8 @@ class FlutterBluePlusWinrtPlugin : public flutter::Plugin {
 
   // Guards the GATT object caches below (characteristic_cache_,
   // descriptor_cache_, service_cache_, subscribed_characteristics_,
-  // gatt_sessions_, mtu_tokens_, connection_tokens_). These are accessed both
+  // gatt_sessions_, mtu_tokens_, connection_params_requests_,
+  // connection_tokens_). These are accessed both
   // from background thread-pool continuations (service discovery / read /
   // write) and from the UI thread (ClearDeviceResources on disconnect), so
   // every access must hold this mutex. NOTE: never hold this across a
@@ -84,6 +85,12 @@ class FlutterBluePlusWinrtPlugin : public flutter::Plugin {
   // MTU / Session Handling
   std::map<std::string, winrt::Windows::Foundation::IInspectable> gatt_sessions_{};
   std::map<std::string, winrt::event_token> mtu_tokens_{};
+  // Windows 11 BluetoothLEPreferredConnectionParametersRequest per device.
+  // The short connection interval holds only while the request is open.
+  std::map<std::string, winrt::Windows::Foundation::IInspectable> connection_params_requests_{};
+  // Revokes, closes and forgets the session, MTU token and connection
+  // parameters request of one device. Caller holds gatt_cache_mutex_.
+  void CloseSessionLocked(const std::string& remote_id);
 
   // Per-device ConnectionStatusChanged event tokens, so the handlers can be
   // revoked (in ClearDeviceResources and the destructor) and never fire into a
