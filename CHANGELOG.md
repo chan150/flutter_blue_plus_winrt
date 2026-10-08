@@ -1,3 +1,6 @@
+## 0.0.22
+* Write without response now completes once the stack has the packet, as on Android and Darwin, instead of after the send. Back-to-back writes no longer wait a connection event each (Windows 10 FOTA 7.8 -> 10 KB/s).
+
 ## 0.0.21
 * Fix: MTU stayed 23 again (the GattSession was never opened). Connect now opens it and reports the negotiated MTU, then every change.
 * Windows 11: request ThroughputOptimized connection parameters while connected.
